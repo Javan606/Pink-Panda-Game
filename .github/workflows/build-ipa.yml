@@ -1,1 +1,80 @@
-
+name: Build Pink Panda 3D IPA
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ios-main
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare iOS source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f project.yml ]; then
+            echo "SOURCE_DIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          else
+            mkdir -p "$RUNNER_TEMP/game-source"
+            unzip -q PinkPanda3D_source.zip -d "$RUNNER_TEMP/game-source"
+            test -f "$RUNNER_TEMP/game-source/project.yml"
+            echo "SOURCE_DIR=$RUNNER_TEMP/game-source" >> "$GITHUB_ENV"
+          fi
+      - name: Install XcodeGen and report tools
+        run: |
+          brew install xcodegen
+          xcodebuild -version
+          xcodegen --version
+      - name: Generate project
+        run: |
+          cd "$SOURCE_DIR"
+          xcodegen generate
+      - name: Compile unsigned iPhone app
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+          xcodebuild -project PinkPanda3D.xcodeproj -scheme PinkPanda3D -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/DerivedData" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" ARCHS=arm64 CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" build 2>&1 | tee "$GITHUB_WORKSPACE/xcodebuild.log"
+      - name: Verify and package genuine IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/PinkPanda3D.app"
+          plutil -lint "$APP/Info.plist"
+          EXEC=$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$APP/Info.plist")
+          test -x "$APP/$EXEC"
+          file "$APP/$EXEC" | tee "$RUNNER_TEMP/ipa-validation.txt"
+          file "$APP/$EXEC" | grep -q 'Mach-O 64-bit executable arm64'
+          xcrun vtool -show-build "$APP/$EXEC" | tee -a "$RUNNER_TEMP/ipa-validation.txt"
+          xcrun vtool -show-build "$APP/$EXEC" | grep -Eq 'platform[[:space:]]+IOS$'
+          test -s "$APP/index.html"
+          test -s "$APP/Assets.car"
+          mkdir -p "$RUNNER_TEMP/package/Payload" "$GITHUB_WORKSPACE/dist"
+          ditto "$APP" "$RUNNER_TEMP/package/Payload/PinkPanda3D.app"
+          cd "$RUNNER_TEMP/package"
+          zip -qry "$GITHUB_WORKSPACE/dist/PinkPanda3D-unsigned.ipa" Payload
+          unzip -t "$GITHUB_WORKSPACE/dist/PinkPanda3D-unsigned.ipa"
+          shasum -a 256 "$GITHUB_WORKSPACE/dist/PinkPanda3D-unsigned.ipa" | tee -a "$RUNNER_TEMP/ipa-validation.txt"
+          cp "$RUNNER_TEMP/ipa-validation.txt" "$GITHUB_WORKSPACE/dist/"
+          echo 'Verified compiled ARM64 iOS executable and bundled game assets. Extract the artifact ZIP and import the IPA into SideStore.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: PinkPanda3D-unsigned-IPA
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcode-build-log
+          path: xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 7
